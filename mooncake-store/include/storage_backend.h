@@ -245,6 +245,12 @@ struct FileStorageConfig {
     // single-NVME read throughput from ~1.4 GB/s (serial, QD=1) to ~4-5 GB/s
     // (QD=N). 0 or 1 keeps the legacy serial loop. Mirrors offload_write_threads.
     uint32_t offload_read_threads = 4;
+    // Parallel endpoint thread pool size for LOCAL_DISK offload reads. Each
+    // batch_get_into[_multi_buffers] may fan out to N independent store pods
+    // (separate transport endpoints); fetching from them in parallel raises
+    // aggregate read bandwidth from single-pod (e.g. ~6 GB/s) to N-pod
+    // (e.g. ~48 GB/s across 8 pods). 0 or 1 keeps the legacy serial loop.
+    uint32_t offload_endpoint_threads = 8;
     // Soft local backlog cap. 0 = unbounded.
     uint32_t promotion_queue_capacity = 1024;
     // Per-worker drain batch size.
