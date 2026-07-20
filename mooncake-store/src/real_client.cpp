@@ -11,9 +11,11 @@
 #include <dlfcn.h>  // for dlsym (Python detection)
 #include <cstdlib>  // for atexit
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -4667,6 +4669,7 @@ RealClient::batch_get_into_internal(const std::vector<std::string> &keys,
     }
 
     size_t offload_object_count = 0;
+    for (const auto &oe : offload_objects) offload_object_count += oe.second.size();
     auto start_read_store_time = std::chrono::steady_clock::now();
     {
         std::ostringstream oss;
@@ -4676,17 +4679,82 @@ RealClient::batch_get_into_internal(const std::vector<std::string> &keys,
         }
         VLOG(1) << oss.str();
     }
-    for (auto &offload_objects_it : offload_objects) {
-        offload_object_count += offload_objects_it.second.size();
-        auto batch_get_offload_result = batch_get_into_offload_object_internal(
-            offload_objects_it.first, offload_objects_it.second);
-        if (!batch_get_offload_result) {
-            LOG(ERROR) << "Batch get store object failed with error: "
-                       << batch_get_offload_result.error();
-            for (const auto &offload_object_it : offload_objects_it.second) {
-                results[valid_local_disk_operations.at(offload_object_it.first)
-                            .original_index] =
-                    tl::make_unexpected(batch_get_offload_result.error());
+    // Each endpoint targets an independent store pod (separate NVMe, separate
+    // transport). Fetching from them in parallel raises aggregate read
+    // bandwidth from single-pod to N-pod. Different workers touch disjoint
+    // keys in `results` (a key belongs to exactly one endpoint), so the only
+    // shared mutable state is `results` itself, indexed by original_index.
+    {
+        const size_t n_endpoints = offload_objects.size();
+        const uint32_t endpoint_threads = std::max<uint32_t>(
+            1, GetEnvOr<uint32_t>("MOONCAKE_OFFLOAD_ENDPOINT_THREADS", 8));
+        const bool use_parallel =
+            (endpoint_threads > 1 && n_endpoints > 1);
+
+        VLOG(1) << "action=offload_endpoint_dispatch endpoints=" << n_endpoints
+                << " threads=" << endpoint_threads
+                << " parallel=" << (use_parallel ? "true" : "false");
+
+        // Snapshot endpoints into a vector so workers can index concurrently
+        // without touching the unordered_map.
+        std::vector<std::pair<std::string,
+                              std::unordered_map<std::string,
+                                                 std::vector<Slice>>*>>
+            endpoint_snapshot;
+        endpoint_snapshot.reserve(n_endpoints);
+        for (auto &oe : offload_objects) {
+            endpoint_snapshot.emplace_back(oe.first, &oe.second);
+        }
+
+        auto process_endpoint = [&](const std::string &endpoint,
+            std::unordered_map<std::string, std::vector<Slice>> &objects)
+            -> std::optional<ErrorCode> {
+            auto batch_get_offload_result =
+                batch_get_into_offload_object_internal(endpoint, objects);
+            if (!batch_get_offload_result) {
+                LOG(ERROR) << "Batch get store object failed with error: "
+                           << batch_get_offload_result.error();
+                for (const auto &offload_object_it : objects) {
+                    results[valid_local_disk_operations
+                                .at(offload_object_it.first)
+                                .original_index] =
+                        tl::make_unexpected(
+                            batch_get_offload_result.error());
+                }
+                return batch_get_offload_result.error();
+            }
+            return std::nullopt;
+        };
+
+        if (!use_parallel) {
+            for (auto &[endpoint, objects_ptr] : endpoint_snapshot) {
+                if (auto err = process_endpoint(endpoint, *objects_ptr);
+                    err.has_value()) {
+                    // Continue other endpoints on error to maximize partial
+                    // success; first error is logged above.
+                }
+            }
+        } else {
+            std::atomic<size_t> next_index{0};
+            std::vector<std::thread> workers;
+            workers.reserve(endpoint_threads);
+            for (uint32_t i = 0; i < endpoint_threads; ++i) {
+                workers.emplace_back([&]() {
+                    for (;;) {
+                        size_t i = next_index.fetch_add(
+                            1, std::memory_order_acq_rel);
+                        if (i >= n_endpoints) return;
+                        auto &[endpoint, objects_ptr] =
+                            endpoint_snapshot[i];
+                        (void)process_endpoint(endpoint, *objects_ptr);
+                        // Errors are logged + results marked inside
+                        // process_endpoint; we do not early-terminate so
+                        // other endpoints can still succeed.
+                    }
+                });
+            }
+            for (auto &w : workers) {
+                if (w.joinable()) w.join();
             }
         }
     }
@@ -5105,13 +5173,45 @@ RealClient::batch_get_into_multi_buffers_internal(
                     .emplace(key, std::move(user_slices));
             }
 
-            for (auto &[endpoint, objects] : offload_objects) {
-                if (objects.empty()) continue;
+            // Each endpoint targets an independent store pod. Fetching in
+            // parallel raises aggregate read bandwidth across all store pods
+            // (mirrors the offload_endpoint_dispatch in batch_get_into_internal
+            // above). Different workers write disjoint indices in `results`
+            // because a key belongs to exactly one endpoint.
+            const size_t n_endpoints = offload_objects.size();
+            const uint32_t endpoint_threads = std::max<uint32_t>(
+                1, GetEnvOr<uint32_t>("MOONCAKE_OFFLOAD_ENDPOINT_THREADS", 8));
+            const bool use_parallel =
+                (endpoint_threads > 1 && n_endpoints > 1);
+
+            VLOG(1) << "action=offload_multi_buffers_endpoint_dispatch"
+                    << " endpoints=" << n_endpoints
+                    << " threads=" << endpoint_threads
+                    << " parallel=" << (use_parallel ? "true" : "false");
+
+            // Snapshot endpoints so workers can index without touching the
+            // unordered_map. Pointers remain valid because offload_objects
+            // is local and outlives the workers.
+            std::vector<std::pair<
+                std::string,
+                std::unordered_map<std::string, std::vector<Slice>>*>>
+                endpoint_snapshot;
+            endpoint_snapshot.reserve(n_endpoints);
+            for (auto &oe : offload_objects) {
+                if (oe.second.empty()) continue;
+                endpoint_snapshot.emplace_back(oe.first, &oe.second);
+            }
+            const size_t n_active = endpoint_snapshot.size();
+
+            auto process_endpoint =
+                [&](const std::string &endpoint,
+                    std::unordered_map<std::string, std::vector<Slice>>
+                        &objects) -> void {
                 auto read_result =
                     batch_get_into_offload_object_internal(endpoint, objects);
                 // On success: results[original_index] was already pre-filled
-                // with total_size when valid_local_disk_ops was built; nothing
-                // to update. Only overwrite on failure.
+                // with total_size when valid_local_disk_ops was built;
+                // nothing to update. Only overwrite on failure.
                 if (!read_result) {
                     for (auto &[key, slices] : objects) {
                         auto disk_it = valid_local_disk_ops.find(key);
@@ -5121,6 +5221,31 @@ RealClient::batch_get_into_multi_buffers_internal(
                         results[disk_it->second.original_index] =
                             tl::make_unexpected(read_result.error());
                     }
+                }
+            };
+
+            if (!use_parallel) {
+                for (auto &[endpoint, objects_ptr] : endpoint_snapshot) {
+                    process_endpoint(endpoint, *objects_ptr);
+                }
+            } else {
+                std::atomic<size_t> next_index{0};
+                std::vector<std::thread> workers;
+                workers.reserve(endpoint_threads);
+                for (uint32_t i = 0; i < endpoint_threads; ++i) {
+                    workers.emplace_back([&]() {
+                        for (;;) {
+                            size_t i = next_index.fetch_add(
+                                1, std::memory_order_acq_rel);
+                            if (i >= n_active) return;
+                            auto &[endpoint, objects_ptr] =
+                                endpoint_snapshot[i];
+                            process_endpoint(endpoint, *objects_ptr);
+                        }
+                    });
+                }
+                for (auto &w : workers) {
+                    if (w.joinable()) w.join();
                 }
             }
         }
