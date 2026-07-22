@@ -203,4 +203,21 @@ tl::expected<size_t, ErrorCode> PosixFile::vector_read(const iovec *iov,
     return read_total;
 }
 
+tl::expected<void, ErrorCode> PosixFile::datasync() {
+    if (fd_ < 0) {
+        return make_error<void>(ErrorCode::FILE_NOT_FOUND);
+    }
+    if (::fdatasync(fd_) != 0) {
+        int saved_errno = errno;
+        char errbuf[256];
+        strerror_r(saved_errno, errbuf, sizeof(errbuf));
+        LOG(ERROR) << "fdatasync failed for file: " << filename_
+                   << ", errno=" << saved_errno
+                   << " (" << errbuf << ")"
+                   << ", fd=" << fd_;
+        return make_error<void>(ErrorCode::FILE_WRITE_FAIL);
+    }
+    return {};
+}
+
 }  // namespace mooncake

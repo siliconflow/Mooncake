@@ -2380,6 +2380,35 @@ tl::expected<void, ErrorCode> BucketStorageBackend::WriteBucket(
             return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
         }
 
+        // Flush data to stable storage. O_DIRECT reads (UringFile) bypass
+        // the page cache; without fdatasync, a subsequent O_DIRECT read
+        // may race with in-progress writeback and see partial data at
+        // 4096 boundaries — matching the "uring read short of data" pattern
+        // observed in stage-4 SSD-offload tests.
+        auto sync_result = file->datasync();
+        if (!sync_result) {
+            LOG(ERROR) << "datasync failed for bucket: " << bucket_id
+                       << ", error: " << sync_result.error();
+            return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+        }
+
+        // Verify file size matches the metadata record. If the file is
+        // shorter than expected, the write was silently truncated by the
+        // filesystem (e.g. ENOSPC during delayed allocation). Catching it
+        // here prevents the "uring read short of data" error on the read
+        // path.
+        struct stat st;
+        if (::fstat(file->fd(), &st) == 0) {
+            if (static_cast<int64_t>(st.st_size) !=
+                bucket_metadata->data_size) {
+                LOG(ERROR) << "File size mismatch after write+sync: "
+                           << bucket_data_path
+                           << ", expected=" << bucket_metadata->data_size
+                           << ", actual=" << st.st_size;
+                return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+            }
+        }
+
         // Invalidate cache for this file since content changed
         {
             MutexLocker cache_locker(&file_cache_mutex_);
