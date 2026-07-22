@@ -143,6 +143,12 @@ class StorageFile {
         return FileLockRAII(fd_, FileLockRAII::LockType::READ);
     }
 
+    virtual tl::expected<void, ErrorCode> datasync() {
+        return {};
+    }
+
+    int fd() const { return fd_; }
+
     /**
      * @brief Gets the current error code
      * @return Current error code
@@ -170,7 +176,8 @@ class PosixFile : public StorageFile {
     tl::expected<size_t, ErrorCode> vector_write(const iovec *iov, int iovcnt,
                                                  off_t offset) override;
     tl::expected<size_t, ErrorCode> vector_read(const iovec *iov, int iovcnt,
-                                                off_t offset) override;
+                                                 off_t offset) override;
+    tl::expected<void, ErrorCode> datasync() override;
 };
 
 #ifdef USE_URING
@@ -219,7 +226,7 @@ class UringFile : public StorageFile {
 
     // Flush data to stable storage via IORING_FSYNC_DATASYNC.
     // Must be called after write_aligned and before writing dependent metadata.
-    tl::expected<void, ErrorCode> datasync();
+    tl::expected<void, ErrorCode> datasync() override;
 
     // Buffer registration — delegates to the shared ring (process-wide).
     // Static variant: no file instance needed. Must be called once from a
