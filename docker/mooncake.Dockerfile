@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 ###############################################################################
 # Stage 1: build Mooncake from source and produce a Python wheel
 ###############################################################################
@@ -17,14 +15,18 @@ ARG CMAKE_BUILD_TYPE=Release
 ARG EP_TORCH_VERSIONS="2.12.1"
 ARG TORCH_CUDA_ARCH_LIST="8.0;9.0"
 
+ARG BUILD_WITH_EP=0
 ENV PYTHON_VERSION=${PYTHON_VERSION} \
-    BUILD_WITH_EP=1 \
+    BUILD_WITH_EP=${BUILD_WITH_EP} \
     EP_TORCH_VERSIONS=${EP_TORCH_VERSIONS} \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
-    PATH="/usr/local/go/bin:${PATH}"
+    PATH="/usr/local/go/bin:${PATH}" \
+    GOPROXY=https://goproxy.cn,direct \
+    GOSUMDB=sum.golang.google.cn
 
 # Install base build utilities and the requested Python version via deadsnakes PPA
-RUN apt-get update && \
+RUN chmod 1777 /tmp && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -58,7 +60,7 @@ RUN mkdir -p build && \
         -DUSE_HTTP=ON \
         -DUSE_ETCD=ON \
         -DUSE_CUDA=ON \
-        -DWITH_EP=ON \
+        -DWITH_EP=$( [ "$BUILD_WITH_EP" = "1" ] && echo ON || echo OFF ) \
         -DSTORE_USE_ETCD=ON \
         -DPython3_EXECUTABLE=/usr/bin/python${PYTHON_VERSION} \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} && \
@@ -74,7 +76,7 @@ RUN export PATH=/usr/local/nvidia/bin:/usr/local/nvidia/lib64:$PATH && \
     bash build.sh ../../build/mooncake-transfer-engine/nvlink-allocator/
 
 # Build the Python wheel from local sources
-RUN OUTPUT_DIR=dist ./scripts/build_wheel.sh
+RUN OUTPUT_DIR=dist MOONCAKE_WHEEL_VERSION_SUFFIX=$(git describe --tags --always | sed 's/^v//; s/-/./g') ./scripts/build_wheel.sh
 
 ###############################################################################
 # Stage 2: install the freshly built wheel into a runtime image
@@ -91,7 +93,8 @@ ARG PYPA_INDEX_URL=https://bootstrap.pypa.io
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 # Install runtime dependencies and the requested Python version
-RUN apt-get update && \
+RUN chmod 1777 /tmp && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
