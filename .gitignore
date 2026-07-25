@@ -212,3 +212,6 @@ core_*
 # MacOS
 .DS_Store
 .envrc
+
+.opencode
+AGENTS.md
