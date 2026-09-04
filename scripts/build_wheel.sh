@@ -354,6 +354,17 @@ echo "Detected architecture: $ARCH_SUFFIX"
 echo "Detected glibc version: $GLIBC_VERSION"
 echo "Using platform tag: $PLATFORM_TAG"
 
+# Optional: append a local version segment (e.g. commit id) to the wheel
+# version, producing a PEP 440 local version like 0.3.11.post1+bfda1a9b.
+# Set MOONCAKE_WHEEL_VERSION_SUFFIX=bfda1a9b to enable. Disabled by default.
+if [ -n "${MOONCAKE_WHEEL_VERSION_SUFFIX}" ]; then
+    CURRENT_VERSION=$(python${PYTHON_VERSION} -c "import tomllib,sys; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])" 2>/dev/null \
+        || grep -m1 '^version' pyproject.toml | sed 's/version *= *"\(.*\)"/\1/')
+    NEW_VERSION="${CURRENT_VERSION}+${MOONCAKE_WHEEL_VERSION_SUFFIX}"
+    echo "Stamping wheel version: ${CURRENT_VERSION} -> ${NEW_VERSION}"
+    sed -i "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" pyproject.toml
+fi
+
 echo "Repairing wheel with auditwheel for platform: $PLATFORM_TAG"
 if [ "$NPU_BUILD" = "1" ]; then
     python${PYTHON_VERSION} -m build --wheel --no-isolation --outdir ${OUTPUT_DIR}
