@@ -69,8 +69,6 @@ OSS_PREFIX="oss://siliconllm/llm-static/whl/mooncake"
 export DOCKER_BUILDKIT="${BUILDKIT}"
 
 SHORT_COMMIT="$(git rev-parse --short HEAD)"
-PY_SHORT="py$(echo ${PYTHON_VERSION} | tr -d .)"
-CU_SHORT="cu$(echo ${CUDA_VERSION} | cut -d. -f1-2 | tr -d .)"
 
 echo "=== Mooncake wheel build + upload ==="
 echo "  repo:       ${REPO_ROOT}"
@@ -79,7 +77,7 @@ echo "  commit:     ${SHORT_COMMIT}"
 echo "  dockerfile: ${DOCKERFILE}"
 echo "  build args: CUDA=${CUDA_VERSION} UBUNTU=${UBUNTU_VERSION} PYTHON=${PYTHON_VERSION} EP=${BUILD_WITH_EP}"
 echo "  output:     ${OUTPUT_DIR}/"
-[ "${SKIP_UPLOAD}" = "1" ] && echo "  upload:     SKIPPED" || echo "  oss prefix: ${OSS_PREFIX}/${PY_SHORT}-${CU_SHORT}-<MMDDHHMM>/"
+[ "${SKIP_UPLOAD}" = "1" ] && echo "  upload:     SKIPPED" || echo "  oss prefix: ${OSS_PREFIX}/<MMDDHHMM>/"
 echo
 
 # Quick guard: submodules must be populated (COPY . /workspace needs them).
@@ -110,7 +108,7 @@ docker build \
     -f "${DOCKERFILE}" \
     .
 
-WHEEL="$(ls "${OUTPUT_DIR}"/mooncake_transfer_engine-*.whl 2>/dev/null | head -1)"
+WHEEL="$(ls "${OUTPUT_DIR}"/mooncake_transfer_engine*.whl 2>/dev/null | head -1)"
 if [ -z "${WHEEL}" ]; then
     echo "ERROR: no wheel found in ${OUTPUT_DIR}/ after extraction." >&2
     exit 1
@@ -138,7 +136,7 @@ if [ ! -x "${OSSUTIL}" ]; then
 fi
 
 OSS_DATE_DIR="$(date '+%m%d%H%M')"
-OSS_TARGET="${OSS_PREFIX}/${PY_SHORT}-${CU_SHORT}-${OSS_DATE_DIR}/"
+OSS_TARGET="${OSS_PREFIX}/${OSS_DATE_DIR}/"
 
 echo
 echo "=== Uploading to OSS ==="

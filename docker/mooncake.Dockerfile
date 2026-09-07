@@ -88,8 +88,11 @@ RUN python${PYTHON_VERSION} -m pip install patchelf>=0.14.5
 # CUDA_VERSION is re-declared here (not at the top of the stage) so that adding
 # it doesn't invalidate the Docker cache for the expensive apt-get / cmake layers above.
 ARG CUDA_VERSION
-RUN OUTPUT_DIR=dist \
-    MOONCAKE_WHEEL_VERSION_SUFFIX="$(git describe --tags --always | sed 's/^v//; s/-/./g').cu$(echo ${CUDA_VERSION} | cut -d. -f1-2 | tr -d .)" \
+RUN CUDA_MAJOR=$(echo "${CUDA_VERSION}" | cut -d. -f1) && \
+    if [ "${CUDA_MAJOR}" -ge 13 ] 2>/dev/null; then CU13_BUILD=1; else CU13_BUILD=0; fi && \
+    OUTPUT_DIR=dist \
+    CU13_BUILD=${CU13_BUILD} \
+    MOONCAKE_WHEEL_VERSION_SUFFIX="$(git describe --tags --always | sed 's/^v//; s/-/./g')" \
     ./scripts/build_wheel.sh
 
 ###############################################################################
